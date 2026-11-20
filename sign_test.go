@@ -597,15 +597,70 @@ func TestSignWithOpaqueSigner(t *testing.T) {
 	}
 	o := signCase{"x", "rsa", SignOptions{}}.options(t)
 	o.Signer = failing{o.Signer}
-	if _, err := Sign([]byte("x"), o); err == nil || err.Error() != "cms: signing: card removed" {
-		t.Fatalf("got %v", err)
+	_, err := Sign([]byte("x"), o)
+	if !errors.Is(err, ErrSigner) || !errors.Is(err, errCardRemoved) {
+		t.Fatalf("got %v: want ErrSigner and the signer's own error in the chain", err)
+	}
+	if errors.Is(err, ErrOptions) || errors.Is(err, ErrUnsupported) {
+		t.Fatalf("%v is also another class", err)
+	}
+}
+
+var errCardRemoved = errors.New("card removed")
+
+// lyingSigner wraps a real signer and changes what Sign returns or how it
+// signs — the HSM, smart card or remote signer that Public() cannot vouch for.
+type lyingSigner struct {
+	crypto.Signer
+	sign func(io.Reader, []byte, crypto.SignerOpts) ([]byte, error)
+}
+
+func (l lyingSigner) Sign(r io.Reader, d []byte, o crypto.SignerOpts) ([]byte, error) {
+	return l.sign(r, d, o)
+}
+
+// TestSignChecksWhatTheSignerReturned: a Signer whose Public() matches the
+// certificate but whose signature does not verify under it is refused.
+func TestSignChecksWhatTheSignerReturned(t *testing.T) {
+	ids := identities(t)
+	otherRSA, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nilSig := func(io.Reader, []byte, crypto.SignerOpts) ([]byte, error) { return nil, nil }
+	for _, c := range []struct {
+		name string
+		key  string
+		pss  bool
+		sign func(io.Reader, []byte, crypto.SignerOpts) ([]byte, error)
+	}{
+		{"another key", "rsa", false, func(r io.Reader, d []byte, o crypto.SignerOpts) ([]byte, error) {
+			return otherRSA.Sign(r, d, o)
+		}},
+		{"nil signature", "rsa", false, nilSig},
+		{"PSS options ignored", "rsa", true, func(r io.Reader, d []byte, o crypto.SignerOpts) ([]byte, error) {
+			return ids["rsa"].key.Sign(r, d, crypto.SHA256) // PKCS#1 v1.5
+		}},
+		{"Ed25519 nil signature", "ed25519", false, nilSig},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			o := signCase{"x", c.key, SignOptions{PSS: c.pss}}.options(t)
+			o.Signer = lyingSigner{o.Signer, c.sign}
+			der, err := Sign([]byte("x"), o)
+			if err == nil {
+				t.Fatalf("signed with a signature that does not verify: %x", der)
+			}
+			if !errors.Is(err, ErrSigner) {
+				t.Fatalf("%v is not ErrSigner", err)
+			}
+		})
 	}
 }
 
 type failing struct{ crypto.Signer }
 
 func (failing) Sign(_ io.Reader, _ []byte, _ crypto.SignerOpts) ([]byte, error) {
-	return nil, errors.New("card removed")
+	return nil, errCardRemoved
 }
 
 // fakePub is a public key type this package does not implement.

@@ -23,6 +23,12 @@ import (
 // they do when reading.
 var ErrOptions = errors.New("cms: invalid signing options")
 
+// ErrSigner: the crypto.Signer failed, or returned a signature that does not
+// verify under the signer's certificate (another key, ignored PSS options, an
+// empty signature). The signer's own error stays in the chain, so errors.Is
+// finds it as well.
+var ErrSigner = errors.New("cms: signer failed")
+
 var (
 	oidSigningTime   = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 5}
 	oidSigningCertV2 = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 16, 2, 47}
@@ -102,7 +108,14 @@ func Sign(content []byte, o SignOptions) ([]byte, error) {
 	}
 	sig, err := p.sign(o, signed)
 	if err != nil {
-		return nil, fmt.Errorf("cms: signing: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrSigner, err)
+	}
+	// ⛔ Public() matching the certificate says nothing about what Sign
+	// RETURNED: a card or remote signer may sign with another key, ignore
+	// the PSS options, or return nothing. Check the signature over exactly
+	// the bytes signed, with the algorithm the SignerInfo claims.
+	if err := o.Certificate.CheckSignature(p.x509Algo, signed, sig); err != nil {
+		return nil, fmt.Errorf("%w: its signature does not verify under the certificate: %v", ErrSigner, err)
 	}
 
 	cert := o.Certificate
@@ -149,6 +162,7 @@ type plan struct {
 	sigParams []byte // nil: absent
 	ed25519   bool
 	pss       bool
+	x509Algo  x509.SignatureAlgorithm // what the signature is checked with
 }
 
 func (o *SignOptions) contentType() asn1.ObjectIdentifier {
@@ -204,6 +218,7 @@ func (o *SignOptions) plan() (*plan, error) {
 		return nil, err
 	}
 
+	hd, _ := digestFor(p.digestOID) // found by oidOfHash just above
 	if o.PSS {
 		if _, isRSA := pub.(*rsa.PublicKey); !isRSA {
 			return nil, fmt.Errorf("%w: RSA-PSS needs an RSA key", ErrOptions)
@@ -214,13 +229,16 @@ func (o *SignOptions) plan() (*plan, error) {
 		if o.PSS {
 			p.pss = true
 			p.sigOID = oidRSAPSS
+			p.x509Algo = hd.pss
 			p.sigParams = pssParamsDER(p.digestOID, p.hash.Size())
 		} else {
 			p.sigOID = oidRSAEncryption
+			p.x509Algo = hd.rsa
 			p.sigParams = []byte{0x05, 0x00} // NULL, as RFC 3370 §3.2 and OpenSSL write it
 		}
 	case *ecdsa.PublicKey:
 		p.sigOID = ecdsaOID(p.hash)
+		p.x509Algo = hd.ecdsa
 	case ed25519.PublicKey:
 		if p.hash != crypto.SHA512 {
 			return nil, fmt.Errorf("%w: Ed25519 signs with SHA-512 (RFC 8419 §3.1), not %v", ErrOptions, p.hash)
@@ -236,6 +254,7 @@ func (o *SignOptions) plan() (*plan, error) {
 		}
 		p.ed25519 = true
 		p.sigOID = oidEd25519
+		p.x509Algo = x509.PureEd25519
 	default:
 		return nil, fmt.Errorf("%w: a %T key", ErrUnsupported, pub)
 	}

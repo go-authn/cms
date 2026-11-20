@@ -55,6 +55,15 @@ each judged by `openssl cms -verify` and by `Verify`:
   what this package writes (4.1.0 answers "no content" to the attached form;
   the 3.x on CI answers "invalid eddsa instance" to the detached one), so it is
   not emitted.
+- **The signature is checked before it is returned.** `Public()` matching the
+  certificate does not vouch for what a card, HSM or remote signer *returns*,
+  so `Sign` verifies the signature under the certificate, over the exact bytes
+  signed and with the algorithm and PSS parameters it declares. A signature
+  from another key, a nil one, or PKCS #1 v1.5 where PSS was asked, is refused.
+- **`ErrSigner`** is what the signer's own failure and that refusal both wrap
+  (the signer's error stays in the chain), so a caller can branch on
+  `ErrSigner` (the key or device), `ErrOptions` (the request) and
+  `ErrUnsupported` (an algorithm).
 - **`Verify` does not check signing-certificate-v2.** Pinning the signer's
   certificate to that attribute is the caller's, with the chain.
 
