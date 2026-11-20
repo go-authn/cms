@@ -1,6 +1,6 @@
 # cms
 
-Read and verify **CMS SignedData** ([RFC 5652](https://www.rfc-editor.org/rfc/rfc5652))
+Read, verify and **sign** **CMS SignedData** ([RFC 5652](https://www.rfc-editor.org/rfc/rfc5652))
 in pure Go, with no dependencies beyond the standard library — the container
 behind a PDF signature, a UEFI authenticated variable and an S/MIME message.
 `CGO_ENABLED=0`.
@@ -14,6 +14,58 @@ if err != nil { … }
 // validity and revocation — is yours: crypto/x509's Verify, and
 // go-authn/revocation for CRLs.
 ```
+
+## Signing
+
+```go
+der, err := cms.Sign(signed, cms.SignOptions{
+	Signer:      key,   // any crypto.Signer: RSA, ECDSA or Ed25519 — a card or an HSM too
+	Certificate: cert,  // embedded; the SignerInfo names it by issuer and serial
+	Chain:       chain, // optional intermediates
+	Hash:        crypto.SHA256,
+	Detached:    true,  // a PDF signature's /Contents: the content is not inside
+	SigningTime:          time.Now(), // optional signing-time attribute
+	SigningCertificateV2: true,       // RFC 5035: what CAdES / PAdES baseline require
+})
+```
+
+`Sign` returns one DER ContentInfo with **one signer**. Combinations it emits,
+each judged by `openssl cms -verify` and by `Verify`:
+
+| | |
+|---|---|
+| keys | RSA PKCS #1 v1.5, RSASSA-PSS (`PSS: true`), ECDSA, Ed25519 |
+| digest | SHA-256 (default), SHA-384, SHA-512; Ed25519 always SHA-512 (RFC 8419 §3.1) |
+| content | attached or `Detached`; `ContentType` defaults to `id-data` (other types force version 3 and signed attributes, §5.1) |
+| attributes | content-type and message-digest; optional signing-time (UTCTime for 1950–2049, GeneralizedTime outside, §11.3) and signing-certificate-v2 (RFC 5035 §5.4.1, SHA-256 hash algorithm left out as DER's `DEFAULT`); or none at all (`NoSignedAttrs`) |
+
+- **Signed attributes are DER**: a `SET OF` sorted by encoding, because §5.4
+  signs those bytes and `Verify` is strict about them. The embedded
+  certificate set is sorted and deduplicated for the same reason.
+- **Digest algorithm identifiers carry no `NULL` parameters**, as RFC 5754 §2
+  has implementations generate them; RSA's `rsaEncryption` carries one, as
+  PKCS #1 and OpenSSL write it.
+- **Refused**, with `ErrUnsupported`: SHA-1 (by name) and any other hash, a key
+  that is not RSA, ECDSA or Ed25519. With `ErrOptions`: no signer or
+  certificate, a certificate whose public key is not the signer's, Ed25519 with
+  a digest other than SHA-512, `PSS` on a non-RSA key, `NoSignedAttrs` with a
+  content type other than `id-data` or with attributes requested, a signing time
+  outside years 0–9999, and **Ed25519 without signed attributes and attached**:
+  RFC 8419 §3.2 allows it and `Verify` reads it, but OpenSSL 4.1.0 cannot
+  verify that one form (it answers "no content"), so it is not emitted.
+- **`Verify` does not check signing-certificate-v2.** Pinning the signer's
+  certificate to that attribute is the caller's, with the chain.
+
+### UEFI authenticated variables
+
+`go-filesystems/uefi`'s private encoder writes a detached PKCS #7 SignedData over
+SHA-256, RSA PKCS #1 v1.5, no signed attributes, one embedded certificate.
+`SignOptions{Signer, Certificate, Hash: crypto.SHA256, Detached: true,
+NoSignedAttrs: true}` is that shape; a test pins it (the signature is the plain
+RSA signature of SHA-256 of the content, which is what edk2 recomputes) and
+`openssl smime -verify`, which drives the PKCS #7 reader edk2 is built on,
+accepts it. The one byte-level difference is that the digest identifiers omit
+the `NULL` parameters RFC 5754 asks implementations not to write.
 
 ## What it checks
 
@@ -84,9 +136,9 @@ unable to tell a forgery from a format it merely does not speak.
   such an input is **refused** as `ErrMalformed`, never guessed at. The signed
   attributes must be DER in every case (§5.3), so this limit never weakens what
   is verified — it only turns away some well-formed inputs.
-- **No signing.** This release reads and verifies; producing a SignedData comes
-  next. One unexported encoder already exists in the fleet, in
-  `go-filesystems/uefi`, and is meant to move here rather than be written twice.
+- **Signing is one signer, no unsigned attributes, no timestamps.** No
+  counter-signatures, no RFC 3161 timestamp token, no CRLs or OCSP responses in
+  the container, no subject-key-identifier signer identifier, no BER.
 - **No chain validation**, on purpose: RFC 5652 §5.6 places it "beyond the
   scope of this document". `Verify` returns the certificates that signed; trust
   is a separate decision with separate inputs.
@@ -123,7 +175,12 @@ else passed.
 
 ## Measured
 
-- **Coverage: every block** — 0 of 183 uncovered, judged by `covblocks`, which
+- **Signing oracle:** `TestSignedByUsJudgedByOpenSSL` signs 59 combinations
+  (keys × digests × attached/detached × attribute sets) and asks OpenSSL and
+  `Verify` about each one untouched and tampered: 206 verdicts, every pair equal,
+  only the untouched ones accepted. Sweeping `sign.go`'s refusals left 0
+  survivors.
+- **Coverage: every block** — 0 of 294 uncovered, judged by `covblocks`, which
   counts blocks rather than printing a rounded percentage.
 - **Mutation-swept:** every refusal in the package, 45 mutations, **0
   survived and 0 caught by a crash** — each guard is held by an assertion that
