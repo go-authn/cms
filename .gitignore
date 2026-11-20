@@ -32,3 +32,14 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# ⛔ Logs a fuzz or CI wait writes beside the code. The fleet's durable-
+# directory rule sends them into the clone rather than /tmp, which is where
+# `git add -A` sweeps them into a commit.
+.fuzzlog-*.log
+.prwait-*.log
+
+# ⛔ A private key never lands here, test or not: the fixtures are made from
+# keys generated in a temporary directory and discarded (oracle_test.go).
+*.key
+*.pem
