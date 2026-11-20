@@ -47,6 +47,19 @@ var (
 // can lower it.
 var maxInput = 16 << 20
 
+// maxSigners bounds how many SignerInfos one SignedData may carry.
+//
+// ⛔ A SIZE BOUND IS NOT A WORK BOUND, and review measured the difference.
+// Every signer is checked over the WHOLE content, and nothing stops a file
+// from repeating one valid, self-signed signer: 4 000 copies in a 5 MB input
+// over 4 MiB of content took 25 s of CPU, and the 16 MiB limit would allow
+// about forty thousand — minutes, from one file. A PDF signature has one
+// signer and S/MIME rarely more than a few; sixteen is generous. Verify also
+// hashes the content once per digest algorithm rather than once per signer,
+// but that alone does not close it: an Ed25519 signer without signed
+// attributes hashes the content inside ed25519.Verify, every time.
+var maxSigners = 16
+
 // The object identifiers this package recognises (RFC 5652 §5.1, §11.1,
 // §11.2; RFC 5754 for the SHA-2 digests).
 var (
@@ -201,6 +214,10 @@ func Parse(der []byte) (*SignedData, error) {
 		}
 	}
 
+	if len(raw.SignerInfos) > maxSigners {
+		return nil, fmt.Errorf("%w: %d signers, past the limit of %d — each is checked over the whole content",
+			ErrUnsupported, len(raw.SignerInfos), maxSigners)
+	}
 	for i, rs := range raw.SignerInfos {
 		s, err := readSigner(rs)
 		if err != nil {
@@ -272,6 +289,18 @@ func readSigner(rs signerInfoASN1) (Signer, error) {
 	}
 
 	if len(rs.SignedAttrs.FullBytes) > 0 {
+		// ⛔⛔ [0] IMPLICIT SET OF is CONSTRUCTED: the tag byte is 0xA0, never
+		// 0x80. encoding/asn1 matches an `optional,tag:0` RawValue on class
+		// and number alone, so the first version accepted a primitive 0x80
+		// as well — and since §5.4 has the signed bytes rewritten to 0x31
+		// either way, a one-bit change to a valid signature still VERIFIED.
+		// That is malleability, not a forgery of content, but it is two
+		// encodings of one signature, and it is exactly what this package's
+		// own fuzz invariant calls a forgery: the fuzzer never found the
+		// one-bit flip, external review did. OpenSSL 4.1.0 accepts it too.
+		if !rs.SignedAttrs.IsCompound {
+			return s, fmt.Errorf("%w: signedAttrs is not a constructed [0] (tag byte %#x)", ErrMalformed, rs.SignedAttrs.FullBytes[0])
+		}
 		attrs, err := readAttributes(rs.SignedAttrs.Bytes)
 		if err != nil {
 			return s, err
@@ -288,15 +317,48 @@ func readSigner(rs signerInfoASN1) (Signer, error) {
 	return s, nil
 }
 
+// readAttributes reads a SET OF Attribute, field by field.
+//
+// ⛔ BY HAND, because two shapes encoding/asn1 lets through are not DER and
+// §5.3 requires DER here. Unmarshalling into a struct accepts an Attribute
+// SEQUENCE with TRAILING elements after its values, and an `asn1:"set"`
+// RawValue matches ANY tag, so attrValues need not be a SET at all. Neither
+// lets anyone but the signer change what was signed — the bytes are hashed as
+// they arrived — but each is a second encoding of one attribute, and the
+// first is how a parser and a reader come to disagree about a structure.
 func readAttributes(b []byte) ([]Attribute, error) {
 	var out []Attribute
 	for len(b) > 0 {
-		var a attributeASN1
-		rest, err := asn1.Unmarshal(b, &a)
+		var seq asn1.RawValue
+		rest, err := asn1.Unmarshal(b, &seq)
 		if err != nil {
 			return nil, fmt.Errorf("%w: signed attribute: %v", ErrMalformed, err)
 		}
 		b = rest
+		if seq.Class != asn1.ClassUniversal || seq.Tag != asn1.TagSequence || !seq.IsCompound {
+			return nil, fmt.Errorf("%w: a signed attribute that is not a SEQUENCE", ErrMalformed)
+		}
+		var a attributeASN1
+		inner, err := asn1.Unmarshal(seq.Bytes, &a.Type)
+		if err != nil {
+			return nil, fmt.Errorf("%w: signed attribute type: %v", ErrMalformed, err)
+		}
+		inner, err = asn1.Unmarshal(inner, &a.Values)
+		if err != nil {
+			// ⛔ Worded so no other refusal CONTAINS it. This once read
+			// "values of attribute", which the "are not a SET" refusal below
+			// also contains — so with this guard deleted, its test still
+			// passed on the other message, and a mutation sweep marked it a
+			// survivor. A message assertion is only as specific as the words
+			// it can match.
+			return nil, fmt.Errorf("%w: attribute %v carries no readable value set: %v", ErrMalformed, a.Type, err)
+		}
+		if a.Values.Class != asn1.ClassUniversal || a.Values.Tag != asn1.TagSet || !a.Values.IsCompound {
+			return nil, fmt.Errorf("%w: the values of attribute %v are not a SET", ErrMalformed, a.Type)
+		}
+		if len(inner) != 0 {
+			return nil, fmt.Errorf("%w: attribute %v is followed by %d byte(s) inside its SEQUENCE", ErrMalformed, a.Type, len(inner))
+		}
 		attr := Attribute{Type: a.Type}
 		vb := a.Values.Bytes
 		for len(vb) > 0 {

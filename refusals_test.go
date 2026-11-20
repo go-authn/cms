@@ -1,6 +1,7 @@
 package cms
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -103,6 +104,43 @@ func TestParseRefusesWhatAHostileSignerControls(t *testing.T) {
 			_, err := Parse(signedDataInfo(t, tc.inner))
 			wantRefusal(t, err, ErrMalformed, tc.says)
 		})
+	}
+}
+
+// TestAttributesAreReadAsDER covers the shapes encoding/asn1 would accept and
+// §5.3's DER requirement does not: an attribute that is not a SEQUENCE,
+// values that are not a SET (an `asn1:"set"` RawValue matches any tag), and
+// trailing bytes inside an Attribute SEQUENCE (a struct unmarshal ignores
+// them). The first was suspected in review from the source; each is now a
+// refusal with a test, and the control below is a well-formed attribute.
+func TestAttributesAreReadAsDER(t *testing.T) {
+	oid := must(t, oidMessageDigest)
+	value := must(t, []byte{1, 2, 3})
+	set := func(b []byte) []byte { return must(t, asn1.RawValue{Tag: asn1.TagSet, IsCompound: true, Bytes: b}) }
+	seqOf := func(parts ...[]byte) []byte {
+		return must(t, asn1.RawValue{Tag: asn1.TagSequence, IsCompound: true, Bytes: bytes.Join(parts, nil)})
+	}
+	for _, tc := range []struct {
+		name string
+		b    []byte
+		says string
+	}{
+		{"not DER at all", []byte{0x30}, "signed attribute:"},
+		{"an attribute that is not a SEQUENCE", must(t, 5), "not a SEQUENCE"},
+		{"an attribute whose type is not an OID", seqOf(must(t, 5), set(value)), "signed attribute type"},
+		{"an attribute with no values", seqOf(oid), "carries no readable value set"},
+		{"values that are a SEQUENCE, not a SET", seqOf(oid, seqOf(value)), "are not a SET"},
+		{"a trailing element inside the Attribute SEQUENCE", seqOf(oid, set(value), must(t, 7)), "inside its SEQUENCE"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := readAttributes(tc.b)
+			wantRefusal(t, err, ErrMalformed, tc.says)
+		})
+	}
+	// ⛔ The control: the same parts, well formed, are read.
+	got, err := readAttributes(seqOf(oid, set(value)))
+	if err != nil || len(got) != 1 || len(got[0].Values) != 1 {
+		t.Fatalf("a well-formed attribute: %+v, %v", got, err)
 	}
 }
 

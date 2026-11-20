@@ -2,6 +2,8 @@ package cms
 
 import (
 	"bytes"
+	"encoding/asn1"
+	"encoding/binary"
 	"errors"
 	"os"
 	"path/filepath"
@@ -77,17 +79,50 @@ func bound(sd *SignedData, supplied []byte) string {
 	if effective == nil {
 		effective = sd.Content
 	}
-	b.WriteString("|content|")
-	b.Write(effective)
+	// ⛔ EVERY FIELD IS LENGTH-PREFIXED. The first version joined them with
+	// "|tag|" separators, and binary fields can contain those bytes, so two
+	// different tuples could in principle serialise to one string and a
+	// forgery be classed as an original. Review found it by reading.
+	field := func(p []byte) {
+		var n [8]byte
+		binary.BigEndian.PutUint64(n[:], uint64(len(p)))
+		b.Write(n[:])
+		b.Write(p)
+	}
+	field(effective)
 	for i, s := range sd.Signers {
-		b.WriteString("|attrs|")
-		b.Write(s.signedAttrsDER)
-		b.WriteString("|sig|")
-		b.Write(s.Signature)
-		b.WriteString("|key|")
-		b.Write(certs[i].RawSubjectPublicKeyInfo)
+		field(s.signedAttrsDER)
+		field(s.Signature)
+		field(certs[i].RawSubjectPublicKeyInfo)
 	}
 	return b.String()
+}
+
+// primitiveAttrs is rsa-detached with its signedAttrs tag turned from the
+// constructed 0xA0 into the primitive 0x80: one bit. It VERIFIED before
+// readSigner checked IsCompound, which this target calls a forgery — and the
+// fuzzer never produced it. External review did. It is seeded here so every
+// run asks again, rather than hoping a mutator flips that one bit.
+func primitiveAttrs(der []byte) ([]byte, error) {
+	var ci contentInfo
+	if _, err := asn1.Unmarshal(der, &ci); err != nil {
+		return nil, err
+	}
+	var sd signedDataASN1
+	if _, err := asn1.Unmarshal(ci.Content.Bytes, &sd); err != nil {
+		return nil, err
+	}
+	fb := append([]byte(nil), sd.SignerInfos[0].SignedAttrs.FullBytes...)
+	fb[0] = 0x80
+	sd.SignerInfos[0].SignedAttrs = asn1.RawValue{FullBytes: fb}
+	inner, err := asn1.Marshal(sd)
+	if err != nil {
+		return nil, err
+	}
+	return asn1.Marshal(struct {
+		Type    asn1.ObjectIdentifier
+		Content asn1.RawValue
+	}{oidSignedData, asn1.RawValue{Class: asn1.ClassContextSpecific, Tag: 0, IsCompound: true, Bytes: inner}})
 }
 
 // FuzzVerify drives the whole path — Parse, then Verify — and asserts two
@@ -102,6 +137,11 @@ func bound(sd *SignedData, supplied []byte) string {
 // not a forgery of content, and the failure message says which signer.
 func FuzzVerify(f *testing.F) {
 	originals := seed(f)
+	flipped, err := primitiveAttrs(originals[0])
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(flipped)
 	content, err := os.ReadFile(filepath.Join("testdata", "content"))
 	if err != nil {
 		f.Fatal(err)

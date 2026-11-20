@@ -2,6 +2,7 @@ package cms
 
 import (
 	"bytes"
+	"crypto"
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"fmt"
@@ -275,6 +276,29 @@ func TestWhatTheRFCForbidsIsRefusedByName(t *testing.T) {
 				sd.SignerInfos[0].SignatureAlgorithm.Parameters = asn1.RawValue{
 					FullBytes: pss(t, oidSHA256, oidMGF1, oidSHA256, 20, 1)}
 			}, ErrUnsupported, "salt of 20 bytes"},
+		// ---- found by external review ----
+		{"a PRIMITIVE [0] signedAttrs: one bit flipped in a valid signature", "rsa-detached.der",
+			func(t *testing.T, sd *signedDataASN1) {
+				fb := append([]byte(nil), sd.SignerInfos[0].SignedAttrs.FullBytes...)
+				fb[0] = 0x80 // 0xA0 with the constructed bit cleared
+				sd.SignerInfos[0].SignedAttrs = asn1.RawValue{FullBytes: fb}
+			}, ErrMalformed, "not a constructed [0]"},
+		{"Ed25519 with digest SHA-256 (RFC 8419 §3.1)", "ed25519-detached.der",
+			func(t *testing.T, sd *signedDataASN1) {
+				sd.SignerInfos[0].DigestAlgorithm = pkix.AlgorithmIdentifier{Algorithm: oidSHA256}
+			}, ErrMalformed, "RFC 8419 requires SHA-512"},
+		{"Ed25519 with algorithm parameters (RFC 8419 §3.1)", "ed25519-detached.der",
+			func(t *testing.T, sd *signedDataASN1) {
+				sd.SignerInfos[0].SignatureAlgorithm.Parameters = asn1.RawValue{FullBytes: []byte{0x05, 0x00}}
+			}, ErrMalformed, "requires them absent"},
+		{"more signers than maxSigners", "rsa-detached.der",
+			func(t *testing.T, sd *signedDataASN1) {
+				one := sd.SignerInfos[0]
+				sd.SignerInfos = nil
+				for range maxSigners + 1 {
+					sd.SignerInfos = append(sd.SignerInfos, one)
+				}
+			}, ErrUnsupported, "past the limit of 16"},
 		{"no signed attributes over content that is not id-data (§5.3)", "rsa-noattr.der",
 			func(t *testing.T, sd *signedDataASN1) {
 				sd.EncapContentInfo.EContentType = oidSignedData
@@ -290,6 +314,46 @@ func TestWhatTheRFCForbidsIsRefusedByName(t *testing.T) {
 				t.Fatalf("refused for the wrong reason:\n  got  %v\n  want %v containing %q", err, tc.class, tc.says)
 			}
 		})
+	}
+}
+
+// TestAsManySignersAsTheCapAllowsAllVerify is maxSigners' control: the bound
+// refuses one past it, so exactly at it — sixteen copies of one valid signer,
+// the shape review used to measure the amplification — must still verify.
+// Without this, a cap of zero would pass the refusal test above.
+func TestAsManySignersAsTheCapAllowsAllVerify(t *testing.T) {
+	der := rebuild(t, "rsa-detached.der", func(sd *signedDataASN1) {
+		one := sd.SignerInfos[0]
+		sd.SignerInfos = nil
+		for range maxSigners {
+			sd.SignerInfos = append(sd.SignerInfos, one)
+		}
+	})
+	sd, err := Parse(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certs, err := sd.Verify(read(t, "content"))
+	if err != nil || len(certs) != maxSigners {
+		t.Fatalf("%d signers at the cap: %d certificate(s), %v", maxSigners, len(certs), err)
+	}
+}
+
+// TestTheContentIsHashedOncePerAlgorithm pins the other half of the
+// amplification fix: sixteen signers over one digest hash the content once.
+func TestTheContentIsHashedOncePerAlgorithm(t *testing.T) {
+	c := &contentDigests{content: []byte("x")}
+	a := c.of(crypto.SHA256)
+	b := c.of(crypto.SHA256)
+	if &a[0] != &b[0] {
+		t.Fatal("the second signer over SHA-256 hashed the content again")
+	}
+	if len(c.by) != 1 {
+		t.Fatalf("%d digests kept for one algorithm", len(c.by))
+	}
+	c.of(crypto.SHA512)
+	if len(c.by) != 2 {
+		t.Fatalf("%d digests kept for two algorithms", len(c.by))
 	}
 }
 

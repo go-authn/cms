@@ -20,7 +20,7 @@ if err != nil { … }
 Every rule below is enforced, and every refusal is tested **by message**, so a
 test cannot pass because some other check happened to fire first.
 
-| RFC 5652 | rule |
+| RFC | rule |
 |---|---|
 | §5.3 | both signer-identifier forms are read: issuer and serial, and subject key identifier |
 | §5.3 | `signedAttrs` must be present when the content is not `id-data`, and is never an empty set |
@@ -30,11 +30,32 @@ test cannot pass because some other check happened to fire first.
 | §5.6 | the digest is **recomputed here** — "The recipient MUST NOT rely on any message digest values computed by the originator" |
 | §5.4 | the signature covers `signedAttrs` with its `[0] IMPLICIT` tag rewritten to `SET OF`, on the bytes as they arrived — never a re-encoding |
 | §5.1 | an unimplemented algorithm is refused gracefully, as `ErrUnsupported` |
+| §5.3 (DER) | `signedAttrs` is a **constructed** `[0]`; each attribute is a SEQUENCE of an OID and a real SET, with nothing after it |
+| 8419 §3.1 | Ed25519 requires `digestAlgorithm` SHA-512 and no signature-algorithm parameters |
+
+Section numbers are RFC 5652's unless marked 8419.
 
 Beyond the RFC, a signature algorithm that names a hash of its own
 (`sha256WithRSAEncryption`, `ecdsa-with-SHA384`) must name the **same** hash
 as the `digestAlgorithm`. Otherwise one SignerInfo would be making two
 statements about which hash protects it, and only one would be checked.
+
+⚠ **Stricter than OpenSSL on two of these.** OpenSSL 4.1.0 accepts a
+primitive `0x80` tag on the signed attributes — one bit away from a valid
+signature, still verifying — and Ed25519 over SHA-256. This package refuses
+both. The oracle agreement below still holds because no OpenSSL-made fixture
+exercises either: OpenSSL never *writes* them, it only fails to refuse them.
+
+## Resource bounds
+
+- **16 MiB** of input at most.
+- **16 signers** at most, and the content is hashed **once per digest
+  algorithm**, not once per signer. A size bound is not a work bound: review
+  repeated one valid self-signed signer 4 000 times in a 5 MB input over 4 MiB
+  of content, and verification took **25 s** of CPU — about forty thousand
+  signers would fit under the size limit. The cap is what bounds Ed25519
+  without signed attributes, which hashes the content inside `ed25519.Verify`
+  on every call.
 
 **Algorithms:** RSA PKCS #1 v1.5, RSASSA-PSS, ECDSA and Ed25519 ([RFC 8419](https://www.rfc-editor.org/rfc/rfc8419)),
 over SHA-256, SHA-384 and SHA-512. The signature arithmetic itself is
@@ -102,18 +123,27 @@ else passed.
 
 ## Measured
 
-- **Coverage: every block** — 0 of 160 uncovered, judged by `covblocks`, which
+- **Coverage: every block** — 0 of 183 uncovered, judged by `covblocks`, which
   counts blocks rather than printing a rounded percentage.
-- **Mutation-checked:** disabling the duplicate-attribute check turns its tests
-  red, and the failure shows why messages are asserted — with the check gone,
-  the forged input is *still* refused, by the RSA check, so a test asking only
-  for "an error" would have stayed green.
+- **Mutation-swept:** every refusal in the package, 45 mutations, **0
+  survived and 0 caught by a crash** — each guard is held by an assertion that
+  names it. Getting there took three changes the sweep forced: refusal tests
+  now turn a panic into a named failure, and one message was reworded because
+  another refusal's message *contained* it, so its test passed with its guard
+  deleted.
 - **Fuzzed:** `FuzzVerify` asserts that nothing verifies unless what its
   signature binds — signed attributes, signature, public key, content — is
-  exactly what OpenSSL signed. 13 694 176 executions in 120 s at a 1-minute
-  load of 3.5, no failure. Disabling the signature check makes it report a
-  forgery in **5.7 s**; that input is in the committed corpus, so a bypass
-  fails a plain `go test`.
+  exactly what OpenSSL signed. Disabling the signature check makes it report a
+  forgery in **5.7 s**, and that input is in the committed corpus.
+
+  ⛔ **But an early count here measured less than it claimed.** It reported
+  13 694 176 executions with no failure, and a **one-bit** change — the
+  signed-attributes tag turned from constructed to primitive — verified the
+  whole time, which this target's own invariant calls a forgery. The fuzzer
+  never flipped that bit; external review found it by reading the tag check.
+  It is refused now, and the flipped input is seeded so every plain `go test`
+  asks again rather than hoping a mutator finds it. A clean fuzz run is a
+  statement about the inputs it happened to build.
 - `go vet` on darwin, linux, windows, and the 32-bit `386` and `arm` targets.
 
 ## Install

@@ -66,8 +66,9 @@ func (sd *SignedData) Verify(detached []byte) ([]*x509.Certificate, error) {
 		return nil, fmt.Errorf("%w: no signers: a SignedData with none signs nothing", ErrInvalid)
 	}
 	certs := make([]*x509.Certificate, 0, len(sd.Signers))
+	digests := &contentDigests{content: content}
 	for i := range sd.Signers {
-		c, err := sd.verifySigner(&sd.Signers[i], content)
+		c, err := sd.verifySigner(&sd.Signers[i], digests)
 		if err != nil {
 			return nil, fmt.Errorf("signer %d: %w", i, err)
 		}
@@ -76,7 +77,29 @@ func (sd *SignedData) Verify(detached []byte) ([]*x509.Certificate, error) {
 	return certs, nil
 }
 
-func (sd *SignedData) verifySigner(s *Signer, content []byte) (*x509.Certificate, error) {
+// contentDigests hashes the content at most once per digest algorithm, however
+// many signers use that algorithm. Before it, every signer re-hashed the whole
+// content — the amplification maxSigners also bounds (see cms.go).
+type contentDigests struct {
+	content []byte
+	by      map[crypto.Hash][]byte
+}
+
+func (c *contentDigests) of(h crypto.Hash) []byte {
+	if d, ok := c.by[h]; ok {
+		return d
+	}
+	hh := h.New()
+	hh.Write(c.content)
+	if c.by == nil {
+		c.by = map[crypto.Hash][]byte{}
+	}
+	c.by[h] = hh.Sum(nil)
+	return c.by[h]
+}
+
+func (sd *SignedData) verifySigner(s *Signer, digests *contentDigests) (*x509.Certificate, error) {
+	content := digests.content
 	cert := sd.signerCertificate(s)
 	if cert == nil {
 		return nil, fmt.Errorf("%w: the signer's certificate is not in the SignedData", ErrUnsupported)
@@ -92,7 +115,7 @@ func (sd *SignedData) verifySigner(s *Signer, content []byte) (*x509.Certificate
 
 	signed := content
 	if s.SignedAttrs != nil {
-		if err := sd.checkSignedAttrs(s, d.hash, content); err != nil {
+		if err := sd.checkSignedAttrs(s, digests.of(d.hash)); err != nil {
 			return nil, err
 		}
 		// §5.4: the signature covers the DER of signedAttrs with its [0]
@@ -120,7 +143,7 @@ func (sd *SignedData) verifySigner(s *Signer, content []byte) (*x509.Certificate
 // the content type equal to eContentType; and the digest equal to the one
 // THIS side computes — "The recipient MUST NOT rely on any message digest
 // values computed by the originator."
-func (sd *SignedData) checkSignedAttrs(s *Signer, h crypto.Hash, content []byte) error {
+func (sd *SignedData) checkSignedAttrs(s *Signer, computed []byte) error {
 	ctDER, err := singleValue(s.SignedAttrs, oidContentType, "content-type")
 	if err != nil {
 		return err
@@ -141,9 +164,7 @@ func (sd *SignedData) checkSignedAttrs(s *Signer, h crypto.Hash, content []byte)
 	if err := unmarshalAll(mdDER, &md, "message-digest attribute"); err != nil {
 		return err
 	}
-	hh := h.New()
-	hh.Write(content)
-	if subtle.ConstantTimeCompare(hh.Sum(nil), md) != 1 {
+	if subtle.ConstantTimeCompare(computed, md) != 1 {
 		return fmt.Errorf("%w: the content's digest is not the one the signer signed", ErrInvalid)
 	}
 	return nil
@@ -268,8 +289,19 @@ func signatureAlgorithm(ai pkix.AlgorithmIdentifier, d digest) (x509.SignatureAl
 	case oid.Equal(oidECDSAWithSHA512):
 		return same(crypto.SHA512, x509.ECDSAWithSHA512)
 	case oid.Equal(oidEd25519):
-		// RFC 8419: pure EdDSA signs the message itself, with no hash of
-		// its own, so there is no second hash to disagree with.
+		// RFC 8419: pure EdDSA signs the message itself, with no hash of its
+		// own. ⛔ But the RFC still fixes the DIGEST and the parameters, and
+		// the first version checked neither — review signed a message with
+		// digestAlgorithm SHA-256 and it verified (OpenSSL 4.1.0 accepts it
+		// too). §3.1: "When signing with Ed25519, the digestAlgorithm MUST be
+		// id-sha512"; and of signatureAlgorithm, "The algorithm parameters
+		// field MUST be absent."
+		if d.hash != crypto.SHA512 {
+			return 0, fmt.Errorf("%w: Ed25519 with digest %v; RFC 8419 requires SHA-512", ErrMalformed, d.hash)
+		}
+		if len(ai.Parameters.FullBytes) > 0 {
+			return 0, fmt.Errorf("%w: Ed25519 with algorithm parameters; RFC 8419 requires them absent", ErrMalformed)
+		}
 		return x509.PureEd25519, nil
 	}
 	return 0, fmt.Errorf("%w: signature algorithm %v", ErrUnsupported, oid)
