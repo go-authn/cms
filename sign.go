@@ -226,12 +226,13 @@ func (o *SignOptions) plan() (*plan, error) {
 			return nil, fmt.Errorf("%w: Ed25519 signs with SHA-512 (RFC 8419 §3.1), not %v", ErrOptions, p.hash)
 		}
 		// ⛔ MEASURED, NOT READ: RFC 8419 §3.2 allows Ed25519 without signed
-		// attributes, and Verify here accepts it, but OpenSSL 4.1.0 answers
-		// "no content" to an ATTACHED one (the detached form verifies).
+		// attributes (§3 calls them preferred), and Verify here accepts it,
+		// but OpenSSL answers "no content" (4.1.0, attached) or "invalid eddsa
+		// instance" (the 3.x on CI, detached) to what this package writes.
 		// Emitting a container the reference tool rejects is a defect
 		// waiting for its reader, so the combination is refused.
-		if o.NoSignedAttrs && !o.Detached {
-			return nil, fmt.Errorf("%w: Ed25519 without signed attributes is only emitted detached; OpenSSL cannot verify it attached", ErrOptions)
+		if o.NoSignedAttrs {
+			return nil, fmt.Errorf("%w: Ed25519 is only signed with signed attributes; OpenSSL cannot verify it without them", ErrOptions)
 		}
 		p.ed25519 = true
 		p.sigOID = oidEd25519

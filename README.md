@@ -50,9 +50,11 @@ each judged by `openssl cms -verify` and by `Verify`:
   certificate, a certificate whose public key is not the signer's, Ed25519 with
   a digest other than SHA-512, `PSS` on a non-RSA key, `NoSignedAttrs` with a
   content type other than `id-data` or with attributes requested, a signing time
-  outside years 0–9999, and **Ed25519 without signed attributes and attached**:
-  RFC 8419 §3.2 allows it and `Verify` reads it, but OpenSSL 4.1.0 cannot
-  verify that one form (it answers "no content"), so it is not emitted.
+  outside years 0–9999, and **Ed25519 without signed attributes**:
+  RFC 8419 §3.2 allows it and `Verify` reads it, but OpenSSL does not verify
+  what this package writes (4.1.0 answers "no content" to the attached form;
+  the 3.x on CI answers "invalid eddsa instance" to the detached one), so it is
+  not emitted.
 - **`Verify` does not check signing-certificate-v2.** Pinning the signer's
   certificate to that attribute is the caller's, with the chain.
 
@@ -175,9 +177,9 @@ else passed.
 
 ## Measured
 
-- **Signing oracle:** `TestSignedByUsJudgedByOpenSSL` signs 59 combinations
+- **Signing oracle:** `TestSignedByUsJudgedByOpenSSL` signs 58 combinations
   (keys × digests × attached/detached × attribute sets) and asks OpenSSL and
-  `Verify` about each one untouched and tampered: 206 verdicts, every pair equal,
+  `Verify` about each one untouched and tampered: 203 verdicts, every pair equal,
   only the untouched ones accepted. Sweeping `sign.go`'s refusals left 0
   survivors.
 - **Coverage: every block** — 0 of 294 uncovered, judged by `covblocks`, which

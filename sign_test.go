@@ -121,7 +121,7 @@ func signCases() []signCase {
 				for _, s := range shapes {
 					o := SignOptions{Hash: h, PSS: k.pss, Detached: detached}
 					s.f(&o)
-					if k.key == "ed25519" && o.NoSignedAttrs && !detached {
+					if k.key == "ed25519" && o.NoSignedAttrs {
 						continue // refused: see TestSignRefusals
 					}
 					mode := "attached"
@@ -652,7 +652,7 @@ func TestSignRefusals(t *testing.T) {
 		{"SHA-224", base(func(o *SignOptions) { o.Hash = crypto.SHA224 }), ErrUnsupported, "hash function"},
 		{"MD5", base(func(o *SignOptions) { o.Hash = crypto.MD5 }), ErrUnsupported, "hash function"},
 		{"Ed25519 with SHA-256", SignOptions{Signer: ids["ed25519"].key, Certificate: ids["ed25519"].cert, Hash: crypto.SHA256}, ErrOptions, "SHA-512"},
-		{"Ed25519 attached without attributes", SignOptions{Signer: ids["ed25519"].key, Certificate: ids["ed25519"].cert, NoSignedAttrs: true}, ErrOptions, "only emitted detached"},
+		{"Ed25519 without attributes", SignOptions{Signer: ids["ed25519"].key, Certificate: ids["ed25519"].cert, NoSignedAttrs: true, Detached: true}, ErrOptions, "only signed with signed attributes"},
 		{"PSS with ECDSA", SignOptions{Signer: ecID.key, Certificate: ecID.cert, PSS: true}, ErrOptions, "needs an RSA key"},
 		{"PSS with Ed25519", SignOptions{Signer: ids["ed25519"].key, Certificate: ids["ed25519"].cert, PSS: true}, ErrOptions, "needs an RSA key"},
 		{"id-data-less attributes", base(func(o *SignOptions) {
