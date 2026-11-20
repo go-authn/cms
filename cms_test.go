@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/x509/pkix"
 	"encoding/asn1"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -163,6 +164,30 @@ func without(attrs []Attribute, t asn1.ObjectIdentifier) []Attribute {
 	return out
 }
 
+// parseAndVerify is Parse then Verify, with a panic turned into an ERROR the
+// caller's assertion then reads.
+//
+// ⛔ WHY A RECOVER IN A TEST. A mutation sweep removed three guards here —
+// cert == nil, the digest lookup's error, found == nil — and each time the
+// suite went red only because the code after the guard dereferenced nil and
+// crashed the test binary, BEFORE the message assertion ran. That is luck,
+// not a test: nothing proved the assertion would hold. With the panic caught,
+// the assertion is what fails ("got PANIC: …, want …"), and it states the
+// requirement a library fed hostile files has anyway — refuse, never panic.
+func parseAndVerify(der, content []byte) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("PANIC: %v", r)
+		}
+	}()
+	sd, err := Parse(der)
+	if err != nil {
+		return err
+	}
+	_, err = sd.Verify(content)
+	return err
+}
+
 func find(attrs []Attribute, t asn1.ObjectIdentifier) Attribute {
 	for _, a := range attrs {
 		if a.Type.Equal(t) {
@@ -257,10 +282,7 @@ func TestWhatTheRFCForbidsIsRefusedByName(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			der := rebuild(t, tc.fixture, func(sd *signedDataASN1) { tc.mutate(t, sd) })
-			sd, err := Parse(der)
-			if err == nil {
-				_, err = sd.Verify(content)
-			}
+			err := parseAndVerify(der, content)
 			if err == nil {
 				t.Fatal("accepted")
 			}
