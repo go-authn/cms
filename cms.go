@@ -1,5 +1,6 @@
-// Package cms reads and verifies CMS SignedData (RFC 5652): the container a
-// PDF signature, a UEFI authenticated variable and an S/MIME message carry.
+// Package cms reads, verifies and signs CMS SignedData (RFC 5652): the
+// container a PDF signature, a UEFI authenticated variable and an S/MIME
+// message carry. Sign produces one; see SignOptions.
 //
 // Parse reads the structure; (*SignedData).Verify checks every signer's
 // signature against the signed content and returns the certificate each one
