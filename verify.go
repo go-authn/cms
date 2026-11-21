@@ -130,6 +130,15 @@ func (sd *SignedData) verifySigner(s *Signer, digests *contentDigests) (*x509.Ce
 		// all, and a verifier that accepted this would let a signature
 		// over one kind of content be presented as another.
 		return nil, fmt.Errorf("%w: content type %v without signed attributes", ErrMalformed, sd.ContentType)
+	} else if looksLikeSignedAttrs(signed) {
+		// Without signedAttrs the signature covers the content; with them,
+		// the DER of the attributes retagged SET OF. Nothing in the structure
+		// says which one a signature was made over, so a signature made over
+		// attributes re-packs, without the key, as an attribute-less
+		// SignedData whose content is those attributes. What a verifier would
+		// accept as attributes (§5.3 requires content-type and message-digest)
+		// is refused as content.
+		return nil, fmt.Errorf("%w: the signed content is itself a signed-attributes SET: a signature made over attributes replayed as content", ErrInvalid)
 	}
 
 	if err := cert.CheckSignature(algo, signed, s.Signature); err != nil {
@@ -356,4 +365,28 @@ func checkPSS(params []byte, h crypto.Hash) error {
 		return fmt.Errorf("%w: RSASSA-PSS trailer field %d", ErrMalformed, p.TrailerField)
 	}
 	return nil
+}
+
+// looksLikeSignedAttrs reports whether b is a DER SET OF Attribute that carries
+// both a content-type and a message-digest attribute — exactly what §5.3
+// requires signedAttrs to contain, and so exactly what a signature made over
+// signedAttrs can be replayed as. Ordinary content is not such a SET.
+func looksLikeSignedAttrs(b []byte) bool {
+	var set asn1.RawValue
+	rest, err := asn1.Unmarshal(b, &set)
+	if err != nil || len(rest) != 0 {
+		return false
+	}
+	if set.Class != asn1.ClassUniversal || set.Tag != asn1.TagSet || !set.IsCompound {
+		return false
+	}
+	// A refusal returns no attributes, so neither type is found and the
+	// answer is false: the error carries nothing this predicate needs.
+	attrs, _ := readAttributes(set.Bytes)
+	var ct, md bool
+	for _, a := range attrs {
+		ct = ct || a.Type.Equal(oidContentType)
+		md = md || a.Type.Equal(oidMessageDigest)
+	}
+	return ct && md
 }
