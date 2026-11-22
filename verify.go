@@ -176,6 +176,18 @@ func (sd *SignedData) checkSignedAttrs(s *Signer, computed []byte) error {
 	if subtle.ConstantTimeCompare(computed, md) != 1 {
 		return fmt.Errorf("%w: the content's digest is not the one the signer signed", ErrInvalid)
 	}
+	// §11.3: a signing-time attribute, when present, has exactly one value, and
+	// the SignedAttributes MUST NOT include several. The time itself is not
+	// interpreted here ("acceptance of a purported signing time is a matter of
+	// a recipient's discretion"), but a reader of SignedAttrs must not find two.
+	for _, a := range s.SignedAttrs {
+		if a.Type.Equal(oidSigningTime) {
+			if _, err := singleValue(s.SignedAttrs, oidSigningTime, "signing-time"); err != nil {
+				return err
+			}
+			break
+		}
+	}
 	return nil
 }
 
